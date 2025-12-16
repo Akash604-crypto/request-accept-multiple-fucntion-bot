@@ -192,6 +192,9 @@ async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📨 Forward message to broadcast.")
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     chat_id = update.effective_chat.id
 
     if chat_id not in BROADCAST_MODE:
@@ -217,6 +220,7 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_all()
 
     await update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
+
 
 # -------------------- STATS --------------------
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,7 +248,14 @@ def main():
     app.add_handler(CommandHandler("stats", stats_cmd))
 
     app.add_handler(ChatJoinRequestHandler(auto_approve))
-    app.add_handler(MessageHandler(filters.ALL, handle_broadcast))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT,
+            handle_broadcast
+        )
+    )
+
+
 
     print("🤖 Secure admin bot running...")
     app.run_polling()
