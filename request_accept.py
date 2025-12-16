@@ -1,16 +1,16 @@
 """
 Telegram Auto Request Accept Bot
 Author: botmaker Spec
+
 Features:
-- Auto approve join requests (channels & groups)
+- Auto approve NEW join requests (channels & groups)
 - Persistent storage (Render-safe)
-- Admin broadcast to users only
-- Admin utilities
+- Admin broadcast to users only (DM)
+- Stats command
 """
 
 import os
 import json
-import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -50,27 +50,29 @@ def save_json(file: Path, data):
 
 users: Dict[str, dict] = load_json(USERS_FILE, {})
 channels = load_json(CHANNELS_FILE, [])
-stats = load_json(STATS_FILE, {
-    "approved_requests": 0,
-    "broadcasts": 0,
-})
-
-# -------------------- HELPERS --------------------
-def is_admin(update: Update) -> bool:
-    return update.effective_user and update.effective_user.id == ADMIN_CHAT_ID
-
+stats = load_json(
+    STATS_FILE,
+    {
+        "approved_requests": 0,
+        "broadcasts": 0,
+    },
+)
 
 def save_all():
     save_json(USERS_FILE, users)
     save_json(CHANNELS_FILE, channels)
     save_json(STATS_FILE, stats)
 
+# -------------------- HELPERS --------------------
+def is_admin(update: Update) -> bool:
+    return update.effective_user and update.effective_user.id == ADMIN_CHAT_ID
 
-# -------------------- JOIN REQUEST AUTO-APPROVE --------------------
+# -------------------- AUTO APPROVE JOIN REQUEST --------------------
 async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = update.chat_join_request
     chat_id = req.chat.id
 
+    # Only for registered channels/groups
     if chat_id not in channels:
         return
 
@@ -83,33 +85,35 @@ async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "user_id": user.id,
             "username": user.username,
             "first_name": user.first_name,
-            "joined_at": datetime.utcnow().isoformat(),
             "channel_id": chat_id,
+            "joined_at": datetime.utcnow().isoformat(),
         }
 
         save_all()
 
-        # Welcome message (DM)
+        # Welcome DM
         await context.bot.send_message(
             chat_id=user.id,
             text=(
                 "✅ Your request has been approved!\n\n"
                 "Welcome 🎉\n"
                 "Enjoy the content and stay active."
-            )
+            ),
         )
 
     except Exception as e:
-        print("Auto approve error:", e)
-
+        print("Auto-approve error:", e)
 
 # -------------------- ADMIN COMMANDS --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Auto Request Accept Bot is running.\n"
-        "Admin commands available."
+        "🤖 Auto Request Accept Bot is running.\n\n"
+        "Admin Commands:\n"
+        "/addchannel <channel_id>\n"
+        "/broadcast\n"
+        "/broadcastforwardmsg\n"
+        "/stats"
     )
-
 
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -119,56 +123,18 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /addchannel <channel_id>")
         return
 
-    cid = int(context.args[0])
+    try:
+        cid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid channel ID.")
+        return
+
     if cid not in channels:
         channels.append(cid)
         save_all()
         await update.message.reply_text("✅ Channel added. Auto-accept enabled.")
     else:
-        await update.message.reply_text("ℹ️ Channel already exists.")
-
-
-async def approve_old(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /approveoldreq <channel_id>")
-        return
-
-    cid = int(context.args[0])
-    count = 0
-
-    try:
-        async for req in context.bot.get_chat_join_requests(cid):
-            await req.approve()
-            count += 1
-
-        await update.message.reply_text(f"✅ Approved {count} old requests.")
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-async def del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /delall <chat_id>")
-        return
-
-    chat_id = int(context.args[0])
-
-    try:
-        async for msg in context.bot.get_chat_history(chat_id):
-            await context.bot.delete_message(chat_id, msg.message_id)
-
-        await update.message.reply_text("🧹 All messages deleted.")
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
+        await update.message.reply_text("ℹ️ Channel already added.")
 
 # -------------------- BROADCAST (USERS ONLY) --------------------
 BROADCAST_MODE = {}
@@ -180,9 +146,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BROADCAST_MODE[update.effective_chat.id] = "copy"
     await update.message.reply_text(
         "📢 Send the message now.\n"
-        "It will be sent to ALL users (DM only)."
+        "It will be sent to all users via DM."
     )
-
 
 async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -191,9 +156,8 @@ async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BROADCAST_MODE[update.effective_chat.id] = "forward"
     await update.message.reply_text(
         "📨 Forward a message now.\n"
-        "Sender name will remain visible."
+        "Original sender name will remain visible."
     )
-
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -218,27 +182,24 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
 
-
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
     await update.message.reply_text(
         f"📊 Bot Stats\n\n"
-        f"👥 Users: {len(users)}\n"
-        f"📢 Channels: {len(channels)}\n"
+        f"👥 Total Users: {len(users)}\n"
+        f"📢 Channels Added: {len(channels)}\n"
         f"✅ Approved Requests: {stats['approved_requests']}\n"
-        f"📨 Broadcasts: {stats['broadcasts']}"
+        f"📨 Broadcasts Sent: {stats['broadcasts']}"
     )
-
 
 # -------------------- MAIN --------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addchannel", add_channel))
-    app.add_handler(CommandHandler("approveoldreq", approve_old))
-    app.add_handler(CommandHandler("delall", del_all))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("broadcastforwardmsg", broadcast_forward))
     app.add_handler(CommandHandler("stats", stats_cmd))
@@ -248,7 +209,6 @@ def main():
 
     print("🤖 Bot is running...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
