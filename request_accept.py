@@ -51,6 +51,7 @@ channels = load_json(CHANNELS_FILE, [])
 stats = load_json(STATS_FILE, {
     "approved_requests": 0,
     "broadcasts": 0,
+    "blocked_users": 0
 })
 allowed_users = set(load_json(ALLOWED_USERS_FILE, []))
 
@@ -124,29 +125,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- ADMIN COMMANDS --------------------
 async def run_broadcast(message, mode, users, context):
+    user_ids = list(users.keys())  # 🔒 freeze list
+    total = len(user_ids)
     sent = 0
+    blocked = 0
+    last_percent = -1
 
-    for uid in list(users.keys()):
+    progress_msg = await context.bot.send_message(
+        chat_id=message.chat_id,
+        text="📢 Broadcast started...\n📊 0%"
+    )
+
+    for index, uid in enumerate(user_ids, start=1):
         try:
             if mode == "copy":
                 await message.copy(chat_id=int(uid))
             else:
                 await message.forward(chat_id=int(uid))
+
             sent += 1
-            await asyncio.sleep(0.05)  # anti-flood safety
-        except:
-            pass
+            await asyncio.sleep(0.05)
+
+        except Exception as e:
+            if "blocked by the user" in str(e).lower():
+                blocked += 1
+                users.pop(uid, None)
+
+        percent = int((index / total) * 100)
+
+        # 🔁 Update only when % actually changes
+        if percent % 5 == 0 and percent != last_percent:
+            last_percent = percent
+            try:
+                await progress_msg.edit_text(
+                    f"📢 Broadcast in progress...\n"
+                    f"📊 {index} / {total} sent ({percent}%)"
+                )
+            except:
+                pass
 
     stats["broadcasts"] += 1
+    stats["blocked_users"] += blocked
     save_all()
 
     try:
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=f"✅ Broadcast sent to {sent} users."
+        await progress_msg.edit_text(
+            f"✅ Broadcast Completed\n\n"
+            f"📤 Sent: {sent}\n"
+            f"🚫 Blocked: {blocked}\n"
+            f"📊 Total: {total}"
         )
     except:
         pass
+
+
 async def give_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Only main admin can grant access.")
@@ -205,16 +237,37 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deny(update)
         return
 
-    BROADCAST_MODE[update.effective_chat.id] = "copy"
+    chat_id = update.effective_chat.id
+
+    # ✅ ADD THIS GUARD
+    if chat_id in BROADCAST_MODE:
+        await update.message.reply_text("⚠️ Broadcast already pending.")
+        return
+
+    BROADCAST_MODE[chat_id] = "copy"
     await update.message.reply_text("📢 Send message to broadcast (DM only).")
+
 
 async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await deny(update)
         return
 
-    BROADCAST_MODE[update.effective_chat.id] = "forward"
+    chat_id = update.effective_chat.id
+
+    # ✅ ADD THIS GUARD
+    if chat_id in BROADCAST_MODE:
+        await update.message.reply_text("⚠️ Broadcast already pending.")
+        return
+
+    BROADCAST_MODE[chat_id] = "forward"
     await update.message.reply_text("📨 Forward message to broadcast.")
+
+async def clear_broadcast_later(chat_id, delay=300):
+    await asyncio.sleep(delay)
+    BROADCAST_MODE.pop(chat_id, None)
+
+
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -242,13 +295,18 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deny(update)
         return
 
+    total_users = len(users)
+    blocked_users = stats.get("blocked_users", 0)
+
     await update.message.reply_text(
         f"📊 Bot Stats\n\n"
-        f"👥 Users: {len(users)}\n"
+        f"👥 Active Users: {total_users}\n"
         f"📢 Channels: {len(channels)}\n"
         f"✅ Approved Requests: {stats['approved_requests']}\n"
-        f"📨 Broadcasts: {stats['broadcasts']}"
+        f"📨 Broadcasts: {stats['broadcasts']}\n"
+        f"🚫 Total Blocked (lifetime): {blocked_users}"
     )
+
 
 # -------------------- MAIN --------------------
 def main():
