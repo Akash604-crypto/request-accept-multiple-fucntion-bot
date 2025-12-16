@@ -250,7 +250,8 @@ def main():
     app.add_handler(ChatJoinRequestHandler(auto_approve))
     app.add_handler(
         MessageHandler(
-            filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT,
+            filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+
             handle_broadcast
         )
     )
