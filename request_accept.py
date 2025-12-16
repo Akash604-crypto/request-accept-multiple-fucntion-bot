@@ -235,7 +235,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------- MAIN --------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addchannel", add_channel))
     app.add_handler(CommandHandler("approveoldreq", approve_old))
