@@ -8,6 +8,7 @@ SECURED VERSION
 
 import os
 import json
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -122,6 +123,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # -------------------- ADMIN COMMANDS --------------------
+async def run_broadcast(message, mode, users, context):
+    sent = 0
+
+    for uid in list(users.keys()):
+        try:
+            if mode == "copy":
+                await message.copy(chat_id=int(uid))
+            else:
+                await message.forward(chat_id=int(uid))
+            sent += 1
+            await asyncio.sleep(0.05)  # anti-flood safety
+        except:
+            pass
+
+    stats["broadcasts"] += 1
+    save_all()
+
+    try:
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=f"✅ Broadcast sent to {sent} users."
+        )
+    except:
+        pass
 async def give_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Only main admin can grant access.")
@@ -204,22 +229,11 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     mode = BROADCAST_MODE.pop(chat_id)
-    sent = 0
 
-    for uid in list(users.keys()):
-        try:
-            if mode == "copy":
-                await update.message.copy(chat_id=int(uid))
-            else:
-                await update.message.forward(chat_id=int(uid))
-            sent += 1
-        except:
-            pass
-
-    stats["broadcasts"] += 1
-    save_all()
-
-    await update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
+    # 🔥 Run broadcast in background (NON-BLOCKING)
+    asyncio.create_task(
+        run_broadcast(update.message, mode, users, context)
+    )
 
 
 # -------------------- STATS --------------------
