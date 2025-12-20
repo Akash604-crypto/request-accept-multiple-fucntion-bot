@@ -14,9 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 from asyncio import Queue
-from telegram.error import FloodWait
-
-
+from telegram.error import RetryAfter
 
 
 
@@ -236,7 +234,6 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("ℹ️ Channel already exists.")
         
-from telegram.error import FloodWait
 
 async def join_worker(worker_id: int):
     while True:
@@ -264,10 +261,12 @@ async def join_worker(worker_id: int):
                 # enqueue welcome ONLY
                 WELCOME_QUEUE.put_nowait((context.bot, user.id))
 
-            except FloodWait as fw:
-                print(f"[Worker {worker_id}] FloodWait {fw.value}s")
-                await asyncio.sleep(fw.value)
-                await JOIN_QUEUE.put((req, context))  # retry safely
+            except RetryAfter as e:
+                wait = int(e.retry_after)
+                print(f"[Worker {worker_id}] RetryAfter {wait}s")
+                await asyncio.sleep(wait)
+                await JOIN_QUEUE.put((req, context))
+
 
 
             except Exception as e:
@@ -287,8 +286,8 @@ async def welcome_worker():
                 text="👋 Welcome!\n\nYour request has been approved 🎉"
             )
             await asyncio.sleep(0.35)  # safe rate
-        except FloodWait as fw:
-            await asyncio.sleep(fw.value)
+        except RetryAfter as e:
+            await asyncio.sleep(int(e.retry_after))
             WELCOME_QUEUE.put_nowait((bot, user_id))
         except:
             pass
