@@ -39,6 +39,8 @@ CHANNELS_FILE = DATA_DIR / "channels.json"
 STATS_FILE = DATA_DIR / "stats.json"
 ALLOWED_USERS_FILE = DATA_DIR / "allowed_users.json"
 JOIN_QUEUE = Queue()
+JOIN_SEM = asyncio.Semaphore(2)  # max 2 concurrent approvals
+
 
 # -------------------- LOAD / SAVE --------------------
 def load_json(file: Path, default):
@@ -218,37 +220,44 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def join_worker():
     while True:
         req, context = await JOIN_QUEUE.get()
-        try:
-            await req.approve()
-
-            stats["approved_requests"] += 1
-            user = req.from_user
-
-            users[str(user.id)] = {
-                "user_id": user.id,
-                "username": user.username,
-                "first_name": user.first_name,
-                "channel_id": req.chat.id,
-                "joined_at": datetime.utcnow().isoformat(),
-            }
-
-            save_all()
-
+        async with JOIN_SEM:
             try:
-                await context.bot.send_message(
-                    chat_id=user.id,
-                    text="✅ Your request has been approved!\n\nWelcome 🎉",
+                await req.approve()
+
+                stats["approved_requests"] += 1
+                user = req.from_user
+
+                users[str(user.id)] = {
+                    "user_id": user.id,
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "channel_id": req.chat.id,
+                    "joined_at": datetime.utcnow().isoformat(),
+                }
+
+                save_all()
+
+                # optional: delay welcome (does not block approvals)
+                asyncio.create_task(
+                    send_welcome_later(context.bot, user.id, delay=60)
                 )
-            except:
-                pass
 
-            # ✅ SAFE DELAY (THIS IS THE KEY)
-            await asyncio.sleep(2.5)
+                await asyncio.sleep(0.7)  # throttle
 
-        except Exception as e:
-            print("Join approve error:", e)
-            await asyncio.sleep(5)
+            except Exception as e:
+                print("Join approve error:", e)
+                await asyncio.sleep(2)
 
+
+async def send_welcome_later(bot, user_id, delay=60):
+    await asyncio.sleep(delay)
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text="👋 Welcome!\n\nYour request has been approved 🎉"
+        )
+    except:
+        pass
 
 # -------------------- BROADCAST --------------------
 BROADCAST_MODE = {}
@@ -328,8 +337,10 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚫 Total Blocked (lifetime): {blocked_users}"
     )
 async def on_startup(app):
-    # Start join worker after event loop is ready
+    # Start TWO workers for ~2–3 req/sec
     asyncio.create_task(join_worker())
+    asyncio.create_task(join_worker())
+
 
 
 # -------------------- MAIN --------------------
