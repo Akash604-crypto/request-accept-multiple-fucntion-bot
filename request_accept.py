@@ -328,8 +328,11 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚫 Total Blocked (lifetime): {blocked_users}"
     )
 async def on_startup(app):
-    # start join worker AFTER event loop is running
-    app.create_task(join_worker())
+    # start join worker via JobQueue (PTB-approved)
+    app.job_queue.run_once(start_join_worker, when=0)
+
+async def start_join_worker(context: ContextTypes.DEFAULT_TYPE):
+    asyncio.create_task(join_worker())
 
 
 # -------------------- MAIN --------------------
