@@ -327,11 +327,19 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📨 Broadcasts: {stats['broadcasts']}\n"
         f"🚫 Total Blocked (lifetime): {blocked_users}"
     )
+async def on_startup(app):
+    # start join worker AFTER event loop is running
+    app.create_task(join_worker())
 
 
 # -------------------- MAIN --------------------
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(on_startup)   # ✅ ADD THIS
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("giveaccess", give_access))
@@ -344,16 +352,13 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
-
             handle_broadcast
         )
     )
 
-
-    app.create_task(join_worker())
-
     print("🤖 Secure admin bot running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
