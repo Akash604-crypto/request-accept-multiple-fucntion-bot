@@ -17,6 +17,7 @@ from asyncio import Queue
 
 
 
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -54,7 +55,7 @@ def save_json(file: Path, data):
         json.dump(data, f, indent=2)
 
 users: Dict[str, dict] = load_json(USERS_FILE, {})
-channels = load_json(CHANNELS_FILE, [])
+channels = [int(c) for c in load_json(CHANNELS_FILE, [])]
 stats = load_json(STATS_FILE, {
     "approved_requests": 0,
     "broadcasts": 0,
@@ -82,14 +83,18 @@ async def deny(update: Update):
 
 # -------------------- AUTO APPROVE --------------------
 async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.chat_join_request:
+        return
+
     req = update.chat_join_request
-    chat_id = req.chat.id
+    chat_id = int(req.chat.id)
 
     if chat_id not in channels:
         return
 
-    # ✅ ONLY QUEUE — DO NOTHING ELSE
+    print("JOIN REQUEST RECEIVED:", chat_id)  # DEBUG
     await JOIN_QUEUE.put((req, context))
+
 
 
 # -------------------- START --------------------
@@ -368,7 +373,7 @@ def main():
     )
 
     print("🤖 Secure admin bot running...")
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
