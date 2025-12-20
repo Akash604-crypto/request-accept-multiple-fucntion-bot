@@ -12,6 +12,10 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
+from asyncio import Queue
+
+
+
 
 from telegram import Update
 from telegram.ext import (
@@ -34,6 +38,7 @@ USERS_FILE = DATA_DIR / "users.json"
 CHANNELS_FILE = DATA_DIR / "channels.json"
 STATS_FILE = DATA_DIR / "stats.json"
 ALLOWED_USERS_FILE = DATA_DIR / "allowed_users.json"
+JOIN_QUEUE = Queue()
 
 # -------------------- LOAD / SAVE --------------------
 def load_json(file: Path, default):
@@ -81,28 +86,9 @@ async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in channels:
         return
 
-    try:
-        await req.approve()
-        stats["approved_requests"] += 1
+    # ✅ ONLY QUEUE — DO NOTHING ELSE
+    await JOIN_QUEUE.put((req, context))
 
-        user = req.from_user
-        users[str(user.id)] = {
-            "user_id": user.id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "channel_id": chat_id,
-            "joined_at": datetime.utcnow().isoformat(),
-        }
-
-        save_all()
-
-        await context.bot.send_message(
-            chat_id=user.id,
-            text="✅ Your request has been approved!\n\nWelcome 🎉",
-        )
-
-    except Exception as e:
-        print("Auto-approve error:", e)
 
 # -------------------- START --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,6 +214,41 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Channel added successfully.")
     else:
         await update.message.reply_text("ℹ️ Channel already exists.")
+        
+async def join_worker():
+    while True:
+        req, context = await JOIN_QUEUE.get()
+        try:
+            await req.approve()
+
+            stats["approved_requests"] += 1
+            user = req.from_user
+
+            users[str(user.id)] = {
+                "user_id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "channel_id": req.chat.id,
+                "joined_at": datetime.utcnow().isoformat(),
+            }
+
+            save_all()
+
+            try:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text="✅ Your request has been approved!\n\nWelcome 🎉",
+                )
+            except:
+                pass
+
+            # ✅ SAFE DELAY (THIS IS THE KEY)
+            await asyncio.sleep(2.5)
+
+        except Exception as e:
+            print("Join approve error:", e)
+            await asyncio.sleep(5)
+
 
 # -------------------- BROADCAST --------------------
 BROADCAST_MODE = {}
@@ -329,6 +350,7 @@ def main():
     )
 
 
+    app.create_task(join_worker())
 
     print("🤖 Secure admin bot running...")
     app.run_polling()
