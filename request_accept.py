@@ -9,10 +9,12 @@ SECURED VERSION
 import os
 import json
 import asyncio
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
 from asyncio import Queue
+from telegram.error import FloodWait
 
 
 
@@ -40,10 +42,22 @@ CHANNELS_FILE = DATA_DIR / "channels.json"
 STATS_FILE = DATA_DIR / "stats.json"
 ALLOWED_USERS_FILE = DATA_DIR / "allowed_users.json"
 JOIN_QUEUE = Queue()
-JOIN_SEM = asyncio.Semaphore(2)  # max 2 concurrent approvals
+WORKERS = 6
+APPROVE_CONCURRENCY = 4
+
+JOIN_SEM = asyncio.Semaphore(APPROVE_CONCURRENCY)
+WELCOME_QUEUE = Queue()
+LAST_SAVE = 0
+SAVE_INTERVAL = 3  # seconds
+
 
 
 # -------------------- LOAD / SAVE --------------------
+def shutdown():
+    print("Saving data before shutdown...")
+    save_all()
+    save_allowed_users()
+
 def load_json(file: Path, default):
     if file.exists():
         with open(file, "r", encoding="utf-8") as f:
@@ -92,7 +106,7 @@ async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in channels:
         return
 
-    print("JOIN REQUEST RECEIVED:", chat_id)  # DEBUG
+    # FAST, SAFE, NON-BLOCKING
     await JOIN_QUEUE.put((req, context))
 
 
@@ -222,16 +236,18 @@ async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("ℹ️ Channel already exists.")
         
-async def join_worker():
+from telegram.error import FloodWait
+
+async def join_worker(worker_id: int):
     while True:
         req, context = await JOIN_QUEUE.get()
+
         async with JOIN_SEM:
             try:
                 await req.approve()
-
                 stats["approved_requests"] += 1
-                user = req.from_user
 
+                user = req.from_user
                 users[str(user.id)] = {
                     "user_id": user.id,
                     "username": user.username,
@@ -239,30 +255,46 @@ async def join_worker():
                     "channel_id": req.chat.id,
                     "joined_at": datetime.utcnow().isoformat(),
                 }
+                global LAST_SAVE
+                now = asyncio.get_event_loop().time()
+                if now - LAST_SAVE > SAVE_INTERVAL:
+                    save_all()
+                    LAST_SAVE = now
 
-                save_all()
+                # enqueue welcome ONLY
+                WELCOME_QUEUE.put_nowait((context.bot, user.id))
 
-                # optional: delay welcome (does not block approvals)
-                asyncio.create_task(
-                    send_welcome_later(context.bot, user.id, delay=60)
-                )
+            except FloodWait as fw:
+                print(f"[Worker {worker_id}] FloodWait {fw.value}s")
+                await asyncio.sleep(fw.value)
+                await JOIN_QUEUE.put((req, context))  # retry safely
 
-                await asyncio.sleep(0.7)  # throttle
 
             except Exception as e:
-                print("Join approve error:", e)
-                await asyncio.sleep(2)
+                print(f"[Worker {worker_id}] Error:", e)
+
+            finally:
+                JOIN_QUEUE.task_done()
 
 
-async def send_welcome_later(bot, user_id, delay=60):
-    await asyncio.sleep(delay)
-    try:
-        await bot.send_message(
-            chat_id=user_id,
-            text="👋 Welcome!\n\nYour request has been approved 🎉"
-        )
-    except:
-        pass
+
+async def welcome_worker():
+    while True:
+        bot, user_id = await WELCOME_QUEUE.get()
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="👋 Welcome!\n\nYour request has been approved 🎉"
+            )
+            await asyncio.sleep(0.35)  # safe rate
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value)
+            WELCOME_QUEUE.put_nowait((bot, user_id))
+        except:
+            pass
+        finally:
+            WELCOME_QUEUE.task_done()
+
 
 # -------------------- BROADCAST --------------------
 BROADCAST_MODE = {}
@@ -301,6 +333,14 @@ async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_broadcast_later(chat_id, delay=300):
     await asyncio.sleep(delay)
     BROADCAST_MODE.pop(chat_id, None)
+
+async def rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"📈 Join Queue: {JOIN_QUEUE.qsize()}\n"
+        f"📬 Welcome Queue: {WELCOME_QUEUE.qsize()}\n"
+        f"⚙️ Workers: {WORKERS}\n"
+        f"🔒 Approvals concurrency: {APPROVE_CONCURRENCY}"
+    )
 
 
 
@@ -342,9 +382,13 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚫 Total Blocked (lifetime): {blocked_users}"
     )
 async def on_startup(app):
-    # Start TWO workers for ~2–3 req/sec
-    asyncio.create_task(join_worker())
-    asyncio.create_task(join_worker())
+    for i in range(WORKERS):
+        asyncio.create_task(join_worker(i))
+
+    asyncio.create_task(welcome_worker())
+   
+
+
 
 
 
@@ -363,8 +407,10 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("broadcastforwardmsg", broadcast_forward))
     app.add_handler(CommandHandler("stats", stats_cmd))
-
+    app.add_handler(CommandHandler("rate", rate))
     app.add_handler(ChatJoinRequestHandler(auto_approve))
+    signal.signal(signal.SIGTERM, lambda *_: shutdown())
+    signal.signal(signal.SIGINT, lambda *_: shutdown())
     app.add_handler(
         MessageHandler(
             filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
