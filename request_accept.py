@@ -1,3 +1,4 @@
+
 """
 Telegram Auto Request Accept Bot
 Author: botmaker Spec
@@ -130,18 +131,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- ADMIN COMMANDS --------------------
 async def run_broadcast(message, mode, users, context):
-    user_ids = list(users.keys())  # 🔒 freeze list
+    chat_id = message.chat_id
+    start_time = datetime.utcnow()
+
+    user_ids = list(users.keys())
     total = len(user_ids)
     sent = 0
     blocked = 0
     last_percent = -1
 
     progress_msg = await context.bot.send_message(
-        chat_id=message.chat_id,
+        chat_id=chat_id,
         text="📢 Broadcast started...\n📊 0%"
     )
 
     for index, uid in enumerate(user_ids, start=1):
+
+        # ❌ CANCEL CHECK
+        if BROADCAST_CANCEL.get(chat_id):
+            end_time = datetime.utcnow()
+
+            LAST_BROADCAST_REPORT[chat_id] = {
+                "status": "cancelled",
+                "started_at": start_time.isoformat(),
+                "ended_at": end_time.isoformat(),
+                "total": total,
+                "sent": sent,
+                "blocked": blocked,
+            }
+
+            stats["broadcasts"] += 1
+            stats["blocked_users"] += blocked
+            save_all()
+
+            try:
+                await progress_msg.edit_text(
+                    f"❌ Broadcast Cancelled\n\n"
+                    f"📤 Sent: {sent}\n"
+                    f"🚫 Blocked: {blocked}\n"
+                    f"📊 Stopped at: {index}/{total}"
+                )
+            except:
+                pass
+
+            BROADCAST_CANCEL.pop(chat_id, None)
+            return
+
         try:
             if mode == "copy":
                 await message.copy(chat_id=int(uid))
@@ -157,8 +192,6 @@ async def run_broadcast(message, mode, users, context):
                 users.pop(uid, None)
 
         percent = int((index / total) * 100)
-
-        # 🔁 Update only when % actually changes
         if percent % 5 == 0 and percent != last_percent:
             last_percent = percent
             try:
@@ -168,6 +201,17 @@ async def run_broadcast(message, mode, users, context):
                 )
             except:
                 pass
+
+    end_time = datetime.utcnow()
+
+    LAST_BROADCAST_REPORT[chat_id] = {
+        "status": "completed",
+        "started_at": start_time.isoformat(),
+        "ended_at": end_time.isoformat(),
+        "total": total,
+        "sent": sent,
+        "blocked": blocked,
+    }
 
     stats["broadcasts"] += 1
     stats["blocked_users"] += blocked
@@ -182,6 +226,10 @@ async def run_broadcast(message, mode, users, context):
         )
     except:
         pass
+
+    BROADCAST_CANCEL.pop(chat_id, None)
+
+
 
 
 async def give_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,8 +343,29 @@ async def welcome_worker():
             WELCOME_QUEUE.task_done()
 
 
-# -------------------- BROADCAST --------------------
+# -------------------- BROADCAST CONTROL --------------------
 BROADCAST_MODE = {}
+BROADCAST_CANCEL = {}   # chat_id -> bool
+LAST_BROADCAST_REPORT = {}   # chat_id -> report dict
+
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await deny(update)
+        return
+
+    chat_id = update.effective_chat.id
+
+    if chat_id not in BROADCAST_CANCEL:
+        await update.message.reply_text("ℹ️ Broadcast not started yet.")
+        return
+    if BROADCAST_CANCEL.get(chat_id) is True:
+        await update.message.reply_text("ℹ️ Broadcast already cancelling.")
+        return
+
+
+    BROADCAST_CANCEL[chat_id] = True
+    await update.message.reply_text("❌ Broadcast cancellation requested.")
+
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -305,13 +374,17 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # ✅ ADD THIS GUARD
     if chat_id in BROADCAST_MODE:
         await update.message.reply_text("⚠️ Broadcast already pending.")
         return
 
     BROADCAST_MODE[chat_id] = "copy"
+
+    # ✅ AUTO-CLEAR AFTER 5 MIN
+    asyncio.create_task(clear_broadcast_later(chat_id))
+
     await update.message.reply_text("📢 Send message to broadcast (DM only).")
+
 
 
 async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,17 +394,51 @@ async def broadcast_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # ✅ ADD THIS GUARD
     if chat_id in BROADCAST_MODE:
         await update.message.reply_text("⚠️ Broadcast already pending.")
         return
 
     BROADCAST_MODE[chat_id] = "forward"
+
+    # ✅ AUTO-CLEAR AFTER 5 MIN
+    asyncio.create_task(clear_broadcast_later(chat_id))
+
     await update.message.reply_text("📨 Forward message to broadcast.")
+
 
 async def clear_broadcast_later(chat_id, delay=300):
     await asyncio.sleep(delay)
-    BROADCAST_MODE.pop(chat_id, None)
+
+    # Clear ONLY pending broadcast (not running)
+    if chat_id in BROADCAST_MODE:
+        BROADCAST_MODE.pop(chat_id, None)
+
+async def last_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await deny(update)
+        return
+
+    chat_id = update.effective_chat.id
+    report = LAST_BROADCAST_REPORT.get(chat_id)
+
+    if not report:
+        await update.message.reply_text("ℹ️ No broadcast report found.")
+        return
+
+    status = report["status"].upper()
+    started = report["started_at"]
+    ended = report["ended_at"]
+
+    await update.message.reply_text(
+        f"📊 Last Broadcast Report\n\n"
+        f"🟢 Status: {status}\n"
+        f"🕒 Started: {started}\n"
+        f"🕓 Ended: {ended}\n\n"
+        f"🎯 Targeted: {report['total']}\n"
+        f"📤 Delivered: {report['sent']}\n"
+        f"🚫 Blocked: {report['blocked']}"
+    )
+
 
 async def rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -357,10 +464,13 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = BROADCAST_MODE.pop(chat_id)
 
-    # 🔥 Run broadcast in background (NON-BLOCKING)
+    # ✅ CREATE CANCEL FLAG EARLY
+    BROADCAST_CANCEL[chat_id] = False
+
     asyncio.create_task(
         run_broadcast(update.message, mode, users, context)
     )
+
 
 
 # -------------------- STATS --------------------
@@ -405,6 +515,8 @@ def main():
     app.add_handler(CommandHandler("addchannel", add_channel))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("broadcastforwardmsg", broadcast_forward))
+    app.add_handler(CommandHandler("cancelbroadcast", cancel_broadcast))
+    app.add_handler(CommandHandler("lastbroadcast", last_broadcast))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("rate", rate))
     app.add_handler(ChatJoinRequestHandler(auto_approve))
